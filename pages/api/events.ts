@@ -1,16 +1,15 @@
-// ✅ DIGITAL PAISAGISMO CAPI V8.8 - SUPORTE A PII PARA N8N WHATSAPP BOT
-// V8.8: Adicionado suporte a PII (email, telefone, nome) para integração com n8n
-// - Interface UserData agora aceita em, ph, fn
-// - Processamento automático com hash SHA256
-// - Compatível com WhatsApp bot para envio de leads qualificados
-// MANTIDO: Todas as funcionalidades da V8.7
-// - Correções de tipagem e compliance
-// - Deduplicação 6h, cache 50k eventos
-// - IPv6 inteligente
-// - Hotmart webhook
+// ✅ JARDINEI CAPI V9.2 - REDIS + OTIMIZAÇÕES
+// V9.2: Redis Upstash para deduplicação distribuída
+// - TTL 24h (recomendado Meta)
+// - API Graph v21.0
+// - Valor determinístico (consistência Pixel/CAPI)
+// - Tokens via variáveis de ambiente
+// - Fallback para Map() se Redis não configurado
+// - IPv6 inteligente, PII hash, Hotmart webhook
 
 import * as crypto from "crypto";
 import * as zlib from "zlib";
+import { Redis } from "@upstash/redis";
 
 // Tipos para requisição e resposta (compatível com Express/Node.js)
 interface UserData {
@@ -141,57 +140,88 @@ interface ApiResponse {
   setHeader(name: string, value: string): void;
 }
 
-const PIXEL_ID = "888149620416465";
-const ACCESS_TOKEN = "EAAQfmxkTTZCcBQtOrgALugR9F8Ju1Qaz5aS67CFYaG05fY0wkSxuYk6jZCTNZBSyPvdR0QZAn3cA6gNi7FIdCkokmbTRPZAPtA94ZAHPyj4udXBVD75QAVz3XPZBvbzfPx5mh6zY3mZC8ReIOnXhKpwVY3wkJEfyrgNititqfBrbaQTDJRnhsoA2fhV1QsjAjQZDZD";
-const META_URL = `https://graph.facebook.com/v19.0/${PIXEL_ID}/events`;
+// ✅ SEGURANÇA: Tokens via variáveis de ambiente (configurar na Vercel)
+const PIXEL_ID = process.env.META_PIXEL_ID || "";
+const ACCESS_TOKEN = process.env.META_ACCESS_TOKEN || "";
+const META_URL = `https://graph.facebook.com/v21.0/${PIXEL_ID}/events`;
 
-// ✅ SISTEMA DE DEDUPLICAÇÃO MELHORADO
-const eventCache = new Map<string, number>();
-const CACHE_TTL = 6 * 60 * 60 * 1000; // 6 horas (otimizado para reduzir eventos fantasma)
-const MAX_CACHE_SIZE = 50000; // Aumentado para suportar mais eventos
+// ⚠️ Validação de configuração
+if (!PIXEL_ID || !ACCESS_TOKEN) {
+  console.error("❌ ERRO CRÍTICO: META_PIXEL_ID e META_ACCESS_TOKEN devem estar configurados nas variáveis de ambiente!");
+}
 
-function isDuplicateEvent(eventId: string): boolean {
-  const now = Date.now();
+// ✅ SISTEMA DE DEDUPLICAÇÃO COM REDIS (igual Digital Paisagismo)
+const CACHE_TTL_SECONDS = 24 * 60 * 60; // 24 horas em segundos (recomendado Meta)
+const REDIS_KEY_PREFIX = "capi:event:";
 
-  // Limpeza automática de eventos expirados (sem for...of)
-  let cleanedCount = 0;
-  eventCache.forEach((timestamp, id) => {
-    if (now - timestamp > CACHE_TTL) {
-      eventCache.delete(id);
-      cleanedCount++;
-    }
+// Inicializar Redis (compatível com integração Vercel KV e UPSTASH)
+let redis: Redis | null = null;
+const redisUrl = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
+const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
+const useRedis = !!(redisUrl && redisToken);
+
+if (useRedis) {
+  redis = new Redis({
+    url: redisUrl!,
+    token: redisToken!,
   });
+  console.log("✅ Redis Upstash conectado para deduplicação distribuída");
+} else {
+  console.warn("⚠️ Redis não configurado - usando cache em memória (fallback)");
+}
 
-  if (cleanedCount > 0) {
-    console.log(`🧹 Cache limpo: ${cleanedCount} eventos expirados removidos (TTL: 6h)`);
+// Fallback: cache em memória
+const memoryCache = new Map<string, number>();
+const MAX_MEMORY_CACHE = 50000;
+
+// ✅ VALOR DETERMINÍSTICO: Garante consistência Pixel/CAPI
+function generateDeterministicValue(eventId: string, minValue: number = 10, maxValue: number = 100): number {
+  if (!eventId || eventId.length < 8) return minValue;
+  const hexPart = eventId.replace(/[^a-fA-F0-9]/g, '').substring(0, 8);
+  const numericValue = parseInt(hexPart, 16);
+  const range = maxValue - minValue + 1;
+  return (numericValue % range) + minValue;
+}
+
+async function isDuplicateEvent(eventId: string): Promise<boolean> {
+  const cacheKey = `${REDIS_KEY_PREFIX}${eventId}`;
+
+  // ✅ REDIS: Cache distribuído persistente
+  if (redis) {
+    try {
+      const exists = await redis.exists(cacheKey);
+      if (exists) {
+        console.warn(`🚫 [REDIS] Evento duplicado bloqueado: ${eventId}`);
+        return true;
+      }
+      await redis.set(cacheKey, Date.now(), { ex: CACHE_TTL_SECONDS });
+      console.log(`✅ [REDIS] Evento registrado: ${eventId} (TTL: 24h)`);
+      return false;
+    } catch (error) {
+      console.error("❌ Erro Redis, usando fallback em memória:", error);
+    }
   }
 
-  // Verificar se é duplicata
-  if (eventCache.has(eventId)) {
-    const lastSeen = eventCache.get(eventId);
-    const timeDiff = now - (lastSeen || 0);
-    console.warn(`🚫 Evento duplicado bloqueado: ${eventId} (última ocorrência: ${Math.round(timeDiff/1000)}s atrás)`);
+  // ✅ FALLBACK: Cache em memória
+  const now = Date.now();
+  const ttlMs = CACHE_TTL_SECONDS * 1000;
+
+  memoryCache.forEach((timestamp, id) => {
+    if (now - timestamp > ttlMs) memoryCache.delete(id);
+  });
+
+  if (memoryCache.has(eventId)) {
+    console.warn(`🚫 [MEMORY] Evento duplicado bloqueado: ${eventId}`);
     return true;
   }
 
-  // Controle de tamanho do cache
-  if (eventCache.size >= MAX_CACHE_SIZE) {
-    // Remove 10% do cache quando atingir o limite para melhor performance
-    const itemsToRemove = Math.floor(MAX_CACHE_SIZE * 0.1);
-    let removedCount = 0;
-    
-    const eventIds = Array.from(eventCache.keys());
-    for (let i = 0; i < itemsToRemove && i < eventIds.length; i++) {
-      eventCache.delete(eventIds[i]);
-      removedCount++;
-    }
-    
-    console.log(`🗑️ Cache overflow: ${removedCount} eventos mais antigos removidos (${eventCache.size}/${MAX_CACHE_SIZE})`);
+  if (memoryCache.size >= MAX_MEMORY_CACHE) {
+    const keys = Array.from(memoryCache.keys()).slice(0, 5000);
+    keys.forEach(k => memoryCache.delete(k));
   }
 
-  // Adicionar ao cache
-  eventCache.set(eventId, now);
-  console.log(`✅ Evento adicionado ao cache de deduplicação: ${eventId} (cache size: ${eventCache.size})`);
+  memoryCache.set(eventId, now);
+  console.log(`✅ [MEMORY] Evento registrado: ${eventId} (cache: ${memoryCache.size})`);
   return false;
 }
 
@@ -458,9 +488,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     "https://cap.consultoria.jardinei.com",
     "https://projeto.jardinei.com",
     "https://www.projeto.jardinei.com",
-    "http://localhost:3000",
-    "http://localhost:8080",
-    "http://localhost:8081",
+    // ✅ SEGURANÇA: localhost removido em produção
   ];
 
   res.setHeader(
@@ -489,7 +517,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
         const transformedEvent = transformHotmartToMeta(req.body.data, req.body);
         
         // Verificar duplicata
-        if (isDuplicateEvent(transformedEvent.event_id!)) {
+        if (await isDuplicateEvent(transformedEvent.event_id!)) {
           console.log("⚠️ Evento Hotmart duplicado ignorado:", transformedEvent.event_id);
           return res.status(200).json({ status: "duplicate_ignored", event_id: transformedEvent.event_id });
         }
@@ -566,10 +594,13 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       return event;
     });
     
-    // Segundo passo: filtrar duplicatas usando os event_ids
-    const filteredData = eventsWithIds.filter((event: EventData) => {
-      return event.event_id && !isDuplicateEvent(event.event_id);
-    });
+    // Segundo passo: filtrar duplicatas usando os event_ids (async para suportar Redis)
+    const filteredData: EventData[] = [];
+    for (const event of eventsWithIds) {
+      if (event.event_id && !(await isDuplicateEvent(event.event_id))) {
+        filteredData.push(event);
+      }
+    }
 
     const duplicatesBlocked = originalCount - filteredData.length;
 
@@ -584,7 +615,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
         message: "Todos os eventos foram filtrados como duplicatas",
         duplicates_blocked: duplicatesBlocked,
         original_count: originalCount,
-        cache_size: eventCache.size,
+        cache_size: memoryCache.size,
       });
     }
 
@@ -637,7 +668,9 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
         delete customData.currency;
       }
       if (eventName === "Lead") {
-        customData.value = typeof customData.value !== "undefined" ? customData.value : 5000;
+        // ✅ VALOR DETERMINÍSTICO: Usa eventId para gerar valor único mas consistente
+        const deterministicValue = generateDeterministicValue(eventId!, 10, 100);
+        customData.value = typeof customData.value !== "undefined" ? customData.value : deterministicValue;
         customData.currency = customData.currency || "BRL";
       }
 
@@ -807,8 +840,9 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
         .map((e) => `${e.user_data.ct}/${e.user_data.st}/${e.user_data.zp}`)
         .slice(0, 3),
       fbc_processed: enrichedData.filter((e) => e.user_data.fbc).length,
-      cache_size: eventCache.size,
-      cache_ttl_hours: CACHE_TTL / (60 * 60 * 1000),
+      cache_size: memoryCache.size,
+      cache_ttl_hours: CACHE_TTL_SECONDS / 3600,
+      redis_enabled: useRedis,
     });
 
     const response = await fetch(`${META_URL}?access_token=${ACCESS_TOKEN}`, {
@@ -853,7 +887,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       sha256_format_count: enrichedData.filter(
         (e) => e.user_data.external_id && typeof e.user_data.external_id === 'string' && e.user_data.external_id.length === 64
       ).length,
-      cache_size: eventCache.size,
+      cache_size: memoryCache.size,
     });
 
     res.status(200).json({
@@ -863,7 +897,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
         original_events: originalCount,
         processed_events: enrichedData.length,
         duplicates_blocked: duplicatesBlocked,
-        cache_size: eventCache.size,
+        cache_size: memoryCache.size,
       },
     });
   } catch (error: unknown) {
