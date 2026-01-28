@@ -387,12 +387,17 @@ function processFbc(fbc: string): string | null {
     return envelopedFbc;
   }
 
-  // ✅ CORREÇÃO CRÍTICA META: Se tem prefixo fbclid=, preservar valor COMPLETO
+  // ✅ CORREÇÃO CRÍTICA META: Se tem prefixo fbclid=, extrair e formatar corretamente
   if (fbc.startsWith("fbclid=")) {
-    // ✅ CRÍTICO: NÃO remover prefixo - Meta pode precisar do contexto completo
-    // Meta documentação: "do not apply any modifications before using"
-    console.log("✅ FBC com prefixo fbclid= preservado integralmente:", fbc);
-    return fbc; // ✅ PRESERVA valor COMPLETO sem modificações
+    // ✅ CORREÇÃO: Extrair o fbclid e formatar no padrão Meta
+    const fbclidValue = fbc.substring(7); // Remove "fbclid="
+    if (fbclidValue.length >= 15 && /^[A-Za-z0-9_-]+$/.test(fbclidValue)) {
+      const envelopedFbc = `fb.1.${Date.now()}.${fbclidValue}`;
+      console.log("✅ FBC com prefixo fbclid= extraído e formatado:", envelopedFbc.substring(0, 30) + '...');
+      return envelopedFbc;
+    }
+    console.warn("⚠️ fbclid após prefixo inválido:", fbclidValue);
+    return null;
   }
 
   // ✅ CRÍTICO: Para formatos não reconhecidos, tentar envelope se parecer com fbclid
