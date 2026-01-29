@@ -5,7 +5,7 @@
 // - Valor determinístico (consistência Pixel/CAPI)
 // - Tokens via variáveis de ambiente
 // - Fallback para Map() se Redis não configurado
-// - IPv6 inteligente, PII hash, Hotmart webhook
+// - IPv6 inteligente, PII hash
 
 import * as crypto from "crypto";
 import * as zlib from "zlib";
@@ -39,93 +39,12 @@ interface EventData {
   [key: string]: unknown;
 }
 
-// ==================== INTERFACES HOTMART (CORRIGIDAS) ====================
-interface HotmartProduct {
-  id: number;
-  name: string;
-  ucode?: string;
-}
-
-interface HotmartWebhookData {
-  product: HotmartProduct;
-  buyer: {
-    email: string;
-    name?: string;
-    checkout_phone?: string;
-    document?: string;
-    address?: {
-      city?: string;
-      country_iso?: string;
-      state?: string;
-      zipcode?: string;
-    };
-  };
-  checkout_country?: {
-    name?: string;
-    iso?: string;
-  };
-  affiliates?: Array<{
-    affiliate_code?: string;
-    [key: string]: unknown;
-  }>;
-  purchase: {
-    transaction: string;
-    price: { value: number; currency_value: string };
-    status: string;
-  };
-}
-
-interface HotmartWebhookPayload {
-  id: string;
-  creation_date: number;
-  event: string;
-  version: string;
-  data: HotmartWebhookData;
-}
-
-const transformHotmartToMeta = (hotmartData: HotmartWebhookData, webhookPayload: HotmartWebhookPayload): EventData => {
-  const { buyer, product, purchase, checkout_country } = hotmartData;
-
-  // ✅ VALIDAÇÃO: Verificar se dados geográficos estão presentes
-  const isValidString = (str: string) => str && str.trim().length > 0;
-
-  // Priorizar checkout_country.iso sobre checkout_country.name para usar códigos ISO 3166-1 alpha-2
-    const countryName = checkout_country?.iso || buyer.address?.country_iso || checkout_country?.name;
-
-  // ✅ CORREÇÃO CRÍTICA: Aplicar hash SHA256 aos dados geográficos apenas (SEM PII)
-  // Meta CAPI permite dados geográficos hasheados, mas PII deve ser evitado
-  return {
-    event_name: "Purchase",
-    event_time: Math.floor(webhookPayload.creation_date / 1000),
-    action_source: "website",
-    user_data: {
-      // ❌ REMOVIDO: Dados pessoais (email, phone, name) para eliminar vazamento de PII
-      // ✅ MANTIDO: Apenas dados geográficos hasheados (permitidos pelo Meta CAPI)
-      ct: buyer.address?.city && isValidString(buyer.address.city) ? hashSHA256(buyer.address.city) : undefined,
-      st: buyer.address?.state && isValidString(buyer.address.state) ? hashSHA256(buyer.address.state) : undefined,
-      zp: buyer.address?.zipcode && isValidString(buyer.address.zipcode) ? hashSHA256(buyer.address.zipcode) : undefined,
-      // ✅ CORREÇÃO CRÍTICA: Usar countryName calculado (linha 98) no user_data
-      country: countryName && isValidString(countryName) ? hashSHA256(countryName) : undefined,
-    },
-    custom_data: {
-      currency: purchase.price.currency_value,
-      value: purchase.price.value,
-      content_name: product.name,
-      content_ids: [product.id.toString()],
-      content_type: "product",
-      order_id: purchase.transaction,
-    },
-    event_source_url: "https://hotmart.com",
-    event_id: `hotmart_${purchase.transaction}_${Date.now()}`,
-  };
-};
-
 interface ApiRequest {
   method?: string;
   body?: {
     data?: EventData[];
     [key: string]: unknown;
-  } | HotmartWebhookPayload;
+  };
   headers: Record<string, string | string[] | undefined>;
   socket?: {
     remoteAddress?: string;
@@ -390,8 +309,8 @@ function processFbc(fbc: string): string | null {
   
   // ✅ CORREÇÃO CRÍTICA: Aceitar FBC já formatado (fb.subdomainIndex.timestamp.fbclid)
   // Documentação Meta: fb.[0-9]+.[0-9]{13}.[fbclid_value]
-  // ✅ REGEX MAIS RIGOROSO: fbclid deve ter pelo menos 15 caracteres
-  const fbcPattern = /^fb\.[0-9]+\.[0-9]{13}\.[A-Za-z0-9_-]{15,}$/;
+  // ✅ REGEX FLEXÍVEL: fbclid pode conter qualquer caractere (Meta diz "do not modify")
+  const fbcPattern = /^fb\.[0-9]+\.[0-9]{13}\..{15,}$/;
   if (fbcPattern.test(fbc)) {
     console.log("✅ FBC válido (formato padrão Meta):", fbc.substring(0, 30) + '...');
     return fbc; // ✅ PRESERVA valor original sem modificações
@@ -460,17 +379,6 @@ function rateLimit(ip: string): boolean {
   return true;
 }
 
-// ==================== FUNÇÕES HOTMART (CORRIGIDAS) ====================
-const isHotmartWebhook = (body: any): body is HotmartWebhookPayload => {
-  return body && 
-    typeof body.id === "string" && 
-    typeof body.event === "string" && 
-    body.data && 
-    body.data.product && 
-    body.data.buyer && 
-    body.data.purchase;
-};
-
 export default async function handler(req: ApiRequest, res: ApiResponse) {
   const startTime = Date.now();
 
@@ -509,68 +417,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   if (!rateLimit(ip)) return res.status(429).json({ error: "Limite de requisições excedido", retry_after: 60 });
 
   try {
-    // ==================== PROCESSAMENTO HOTMART (CORRIGIDO) ====================
-    if (isHotmartWebhook(req.body)) {
-      console.log("🔥 Webhook Hotmart detectado:", { event: req.body.event, id: req.body.id });
-      
-      if (req.body.event === "PURCHASE_APPROVED") {
-        const transformedEvent = transformHotmartToMeta(req.body.data, req.body);
-        
-        // Verificar duplicata
-        if (await isDuplicateEvent(transformedEvent.event_id!)) {
-          console.log("⚠️ Evento Hotmart duplicado ignorado:", transformedEvent.event_id);
-          return res.status(200).json({ status: "duplicate_ignored", event_id: transformedEvent.event_id });
-        }
-
-        // Preparar payload para Meta CAPI
-        const payload = {
-          data: [transformedEvent],
-          access_token: ACCESS_TOKEN,
-        };
-
-        const payloadString = JSON.stringify(payload);
-        const shouldCompress = payloadString.length > 2048;
-        const finalPayload = shouldCompress ? zlib.gzipSync(payloadString) : payloadString;
-
-        const headers: Record<string, string> = {
-          "Content-Type": "application/json",
-          "User-Agent": "DigitalPaisagismo-CAPI/8.8-Hotmart",
-        };
-
-        if (shouldCompress) {
-          headers["Content-Encoding"] = "gzip";
-        }
-
-        console.log("📤 Enviando evento Hotmart para Meta CAPI:", {
-          event_id: transformedEvent.event_id,
-          transaction: req.body.data.purchase.transaction,
-          value: req.body.data.purchase.price.value,
-          currency: req.body.data.purchase.price.currency_value,
-        });
-
-        const response = await fetch(META_URL, {
-          method: "POST",
-          headers,
-          body: shouldCompress ? new Uint8Array(finalPayload as Buffer) : finalPayload as string,
-          signal: AbortSignal.timeout(15000),
-        });
-
-        const responseData = await response.json();
-
-        if (response.ok) {
-          console.log("✅ Evento Hotmart enviado com sucesso para Meta CAPI");
-          return res.status(200).json({ status: "success", meta_response: responseData });
-        } else {
-          console.error("❌ Erro ao enviar evento Hotmart para Meta CAPI:", responseData);
-          return res.status(500).json({ error: "Erro ao processar webhook Hotmart", details: responseData });
-        }
-      } else {
-        console.log("ℹ️ Evento Hotmart ignorado (não é PURCHASE_APPROVED):", req.body.event);
-        return res.status(200).json({ status: "ignored", event: req.body.event });
-      }
-    }
-
-    // ==================== PROCESSAMENTO FRONTEND (ORIGINAL) ====================
+    // ==================== PROCESSAMENTO FRONTEND ====================
     if (!req.body?.data || !Array.isArray(req.body.data)) {
       return res.status(400).json({ error: "Payload inválido - campo 'data' obrigatório" });
     }
@@ -713,15 +560,14 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
 
       // ✅ CORREÇÃO CRÍTICA: Verificar se dados geográficos já estão hasheados (evitar double hash)
       // SHA256 sempre tem 64 caracteres hexadecimais - se já tem 64 chars, não re-hashear
+      // ✅ CORREÇÃO META: Lowercase geo data antes de hashear (exigência Meta CAPI)
       if (typeof event.user_data?.country === "string" && event.user_data.country.trim()) {
         const countryValue = event.user_data.country.trim();
-        // Verificar se já está hasheado (64 caracteres hexadecimais = SHA256)
         if (countryValue.length === 64 && /^[a-f0-9]{64}$/i.test(countryValue)) {
           userData.country = countryValue;
           console.log("🌍 Country já hasheado (frontend):", countryValue.substring(0, 16) + '...');
         } else {
-          // Fallback: aplicar hash se não estiver hasheado (sem modificar case)
-          userData.country = hashSHA256(countryValue);
+          userData.country = hashSHA256(countryValue.toLowerCase());
           console.log("🌍 Country hasheado (fallback API):", (userData.country as string).substring(0, 16) + '...');
         }
       }
@@ -731,7 +577,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
           userData.st = stateValue;
           console.log("🌍 State já hasheado (frontend):", stateValue.substring(0, 16) + '...');
         } else {
-          userData.st = hashSHA256(stateValue);
+          userData.st = hashSHA256(stateValue.toLowerCase());
           console.log("🌍 State hasheado (fallback API):", (userData.st as string).substring(0, 16) + '...');
         }
       }
@@ -741,7 +587,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
           userData.ct = cityValue;
           console.log("🌍 City já hasheado (frontend):", cityValue.substring(0, 16) + '...');
         } else {
-          userData.ct = hashSHA256(cityValue);
+          userData.ct = hashSHA256(cityValue.toLowerCase());
           console.log("🌍 City hasheado (fallback API):", (userData.ct as string).substring(0, 16) + '...');
         }
       }
