@@ -294,71 +294,44 @@ function formatIPForMeta(ip: string): string {
   return ip;
 }
 
-// ✅ CORREÇÃO CRÍTICA: Processamento FBC conforme documentação Meta oficial
+// ✅ CORREÇÃO CRÍTICA V9.3: Processamento FBC - NUNCA MODIFICAR VALOR ORIGINAL
+// Meta documentação: "do not apply any modifications before using"
+// CAUSA DO ERRO: Estava re-envelopando FBC com novo timestamp
 function processFbc(fbc: string): string | null {
   if (!fbc || typeof fbc !== "string") {
     console.warn("⚠️ FBC inválido:", fbc);
     return null;
   }
 
-  // ✅ CORREÇÃO META: Não usar trim() para preservar valor original
-  // Meta documentação: "do not apply any modifications before using"
-  
-  // ✅ VALIDAÇÃO ANTI-MODIFICAÇÃO: Verificar se valor não foi alterado inadvertidamente
-  const originalFbc = fbc;
-  
-  // ✅ CORREÇÃO CRÍTICA: Aceitar FBC já formatado (fb.subdomainIndex.timestamp.fbclid)
-  // Documentação Meta: fb.[0-9]+.[0-9]{13}.[fbclid_value]
-  // ✅ REGEX FLEXÍVEL: fbclid pode conter qualquer caractere (Meta diz "do not modify")
-  const fbcPattern = /^fb\.[0-9]+\.[0-9]{13}\..{15,}$/;
-  if (fbcPattern.test(fbc)) {
-    console.log("✅ FBC válido (formato padrão Meta):", fbc.substring(0, 30) + '...');
-    return fbc; // ✅ PRESERVA valor original sem modificações
+  // ✅ CORREÇÃO CRÍTICA: Se já está no formato fb.X.timestamp.fbclid, PRESERVAR 100%
+  // Regex mais flexível: aceita qualquer fbclid após o timestamp
+  const fbcFormatted = /^fb\.[0-9]+\.[0-9]{10,}\..+$/;
+  if (fbcFormatted.test(fbc)) {
+    console.log("✅ FBC já formatado - PRESERVANDO SEM MODIFICAÇÃO:", fbc.substring(0, 40) + '...');
+    return fbc; // ✅ RETORNA EXATAMENTE como recebido
   }
 
-  // ✅ CORREÇÃO CRÍTICA: Envelope fbclid no formato Meta oficial
-  // Meta documentação oficial: fb.1.timestamp.fbclid_value
-  // ✅ VALIDAÇÃO MAIS RIGOROSA: fbclid deve ter pelo menos 15 caracteres
-  const fbclidPattern = /^[A-Za-z0-9_-]{15,}$/; // Mais rigoroso: mínimo 15 chars
+  // ✅ Se NÃO está formatado, verificar se é fbclid puro e envelopar
+  // Isso só deve acontecer para fbclid vindos de URL que não foram processados no frontend
   
-  // Se é um fbclid puro (sem prefixo fbclid=)
-  if (fbclidPattern.test(fbc)) {
-    // ✅ VERIFICAÇÃO ANTI-MODIFICAÇÃO: Garantir que não houve alteração de case
-    if (fbc !== originalFbc) {
-      console.error("❌ CRÍTICO: fbclid foi modificado durante processamento!");
-      return null;
-    }
-    
-    // ✅ CORREÇÃO CRÍTICA: Preservar timestamp original se possível
-    // Meta documentação: "do not apply any modifications before using"
-    const envelopedFbc = `fb.1.${Date.now()}.${fbc}`;
-    console.log("✅ fbclid envelopado no formato Meta:", envelopedFbc.substring(0, 30) + '...');
-    return envelopedFbc;
-  }
-
-  // ✅ CORREÇÃO CRÍTICA META: Se tem prefixo fbclid=, extrair e formatar corretamente
+  // Remove prefixo fbclid= se presente
+  let fbclidValue = fbc;
   if (fbc.startsWith("fbclid=")) {
-    // ✅ CORREÇÃO: Extrair o fbclid e formatar no padrão Meta
-    const fbclidValue = fbc.substring(7); // Remove "fbclid="
-    if (fbclidValue.length >= 15 && /^[A-Za-z0-9_-]+$/.test(fbclidValue)) {
-      const envelopedFbc = `fb.1.${Date.now()}.${fbclidValue}`;
-      console.log("✅ FBC com prefixo fbclid= extraído e formatado:", envelopedFbc.substring(0, 30) + '...');
-      return envelopedFbc;
-    }
-    console.warn("⚠️ fbclid após prefixo inválido:", fbclidValue);
-    return null;
+    fbclidValue = fbc.substring(7);
   }
 
-  // ✅ CRÍTICO: Para formatos não reconhecidos, tentar envelope se parecer com fbclid
-  // Meta documentação: "do not apply any modifications before using"
-  if (fbc.length >= 10 && /^[A-Za-z0-9_-]+$/.test(fbc)) {
-    const envelopedFbc = `fb.1.${Date.now()}.${fbc}`;
-    console.log("✅ FBC formato não reconhecido - envelopando:", envelopedFbc);
+  // Validar se parece com fbclid (pelo menos 10 chars, alfanumérico com _ e -)
+  if (fbclidValue.length >= 10 && /^[A-Za-z0-9_-]+$/.test(fbclidValue)) {
+    // ✅ Envelopar apenas fbclid puro que não foi formatado
+    const envelopedFbc = `fb.1.${Date.now()}.${fbclidValue}`;
+    console.log("✅ fbclid puro envelopado:", envelopedFbc.substring(0, 40) + '...');
     return envelopedFbc;
   }
 
-  console.warn("⚠️ FBC inválido - não foi possível processar:", fbc);
-  return null;
+  // ✅ FALLBACK: Preservar valor original mesmo se não reconhecido
+  // Meta pode ter formatos especiais que não conhecemos
+  console.warn("⚠️ FBC formato desconhecido, preservando original:", fbc.substring(0, 30) + '...');
+  return fbc;
 }
 
 const RATE_LIMIT = 100; // Aumentado para suportar picos de tráfego
