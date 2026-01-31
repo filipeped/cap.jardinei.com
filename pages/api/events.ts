@@ -280,15 +280,10 @@ function formatIPForMeta(ip: string): string {
   }
   
   if (ipType === 'IPv4') {
-    // Para IPv4, a Meta recomenda conversão para IPv6-mapped
-    // Formato IPv4-mapped IPv6: ::ffff:192.168.1.1
-    const ipv6Mapped = `::ffff:${ip}`;
-    console.log('🔄 IPv4 convertido para IPv6-mapped:', {
-      original_ipv4: ip,
-      ipv6_mapped: ipv6Mapped,
-      reason: 'Meta prefere IPv6 sobre IPv4'
-    });
-    return ipv6Mapped;
+    // ✅ CORREÇÃO: Meta aceita IPv4 nativo - NÃO converter para IPv6-mapped
+    // Converter pode causar problemas de matching
+    console.log('🌐 IPv4 enviado nativo (sem conversão):', ip);
+    return ip;
   }
   
   return ip;
