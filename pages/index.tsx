@@ -34,9 +34,7 @@ export default function Home() {
     };
 
     const payload = {
-      data: [event],
-      pixel_id: "888149620416465",
-      access_token: "EAAQfmxkTTZCcBQtOrgALugR9F8Ju1Qaz5aS67CFYaG05fY0wkSxuYk6jZCTNZBSyPvdR0QZAn3cA6gNi7FIdCkokmbTRPZAPtA94ZAHPyj4udXBVD75QAVz3XPZBvbzfPx5mh6zY3mZC8ReIOnXhKpwVY3wkJEfyrgNititqfBrbaQTDJRnhsoA2fhV1QsjAjQZDZD"
+      data: [event]
     };
 
     try {

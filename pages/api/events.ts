@@ -289,44 +289,25 @@ function formatIPForMeta(ip: string): string {
   return ip;
 }
 
-// ✅ CORREÇÃO CRÍTICA V9.3: Processamento FBC - NUNCA MODIFICAR VALOR ORIGINAL
+// ✅ CORREÇÃO V9.4: FBC - APENAS PASS-THROUGH, NUNCA MODIFICAR OU RE-CRIAR
 // Meta documentação: "do not apply any modifications before using"
-// CAUSA DO ERRO: Estava re-envelopando FBC com novo timestamp
+// CAUSA DO ERRO ANTERIOR: Estava re-envelopando FBC com novo timestamp/subdomain
+// FIX: Se fbc está no formato correto, usar como recebido. Se não, DESCARTAR.
 function processFbc(fbc: string): string | null {
-  if (!fbc || typeof fbc !== "string") {
-    console.warn("⚠️ FBC inválido:", fbc);
+  if (!fbc || typeof fbc !== "string" || fbc.length < 20) {
     return null;
   }
 
-  // ✅ CORREÇÃO CRÍTICA: Se já está no formato fb.X.timestamp.fbclid, PRESERVAR 100%
-  // Regex mais flexível: aceita qualquer fbclid após o timestamp
+  // Se já está no formato fb.X.timestamp.fbclid, PRESERVAR 100%
   const fbcFormatted = /^fb\.[0-9]+\.[0-9]{10,}\..+$/;
   if (fbcFormatted.test(fbc)) {
-    console.log("✅ FBC já formatado - PRESERVANDO SEM MODIFICAÇÃO:", fbc.substring(0, 40) + '...');
-    return fbc; // ✅ RETORNA EXATAMENTE como recebido
+    console.log("✅ FBC pass-through (sem modificação):", fbc.substring(0, 40) + '...');
+    return fbc;
   }
 
-  // ✅ Se NÃO está formatado, verificar se é fbclid puro e envelopar
-  // Isso só deve acontecer para fbclid vindos de URL que não foram processados no frontend
-  
-  // Remove prefixo fbclid= se presente
-  let fbclidValue = fbc;
-  if (fbc.startsWith("fbclid=")) {
-    fbclidValue = fbc.substring(7);
-  }
-
-  // Validar se parece com fbclid (pelo menos 10 chars, alfanumérico com _ e -)
-  if (fbclidValue.length >= 10 && /^[A-Za-z0-9_-]+$/.test(fbclidValue)) {
-    // ✅ Envelopar apenas fbclid puro que não foi formatado
-    const envelopedFbc = `fb.1.${Date.now()}.${fbclidValue}`;
-    console.log("✅ fbclid puro envelopado:", envelopedFbc.substring(0, 40) + '...');
-    return envelopedFbc;
-  }
-
-  // ✅ FALLBACK: Preservar valor original mesmo se não reconhecido
-  // Meta pode ter formatos especiais que não conhecemos
-  console.warn("⚠️ FBC formato desconhecido, preservando original:", fbc.substring(0, 30) + '...');
-  return fbc;
+  // Se NÃO está no formato correto, NÃO enviar (melhor omitir do que enviar modificado)
+  console.warn("⚠️ FBC formato inválido - DESCARTADO para evitar erro 'fbclid modificado':", fbc.substring(0, 30) + '...');
+  return null;
 }
 
 const RATE_LIMIT = 100; // Aumentado para suportar picos de tráfego
@@ -396,7 +377,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     const eventsWithIds = req.body.data.map((event: EventData) => {
       if (!event.event_id) {
         // Gerar event_id determinístico apenas como fallback
-        const eventName = event.event_name || "Lead";
+        const eventName = event.event_name || "PageView";
         const eventTime = event.event_time && !isNaN(Number(event.event_time)) ? Math.floor(Number(event.event_time)) : Math.floor(Date.now() / 1000);
         const externalId = event.user_data?.external_id || "no_ext_id";
         const eventSourceUrl = event.event_source_url || origin || (req.headers.referer as string) || "https://www.jardinei.com";
@@ -473,11 +454,23 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
         }
       }
 
-      const eventName = event.event_name || "Lead";
+      const eventName = event.event_name || "PageView";
       const eventSourceUrl =
         event.event_source_url || origin || (req.headers.referer as string) || "https://www.jardinei.com";
-      const eventTime = event.event_time && !isNaN(Number(event.event_time)) ? Math.floor(Number(event.event_time)) : Math.floor(Date.now() / 1000);
-      
+      let eventTime = event.event_time && !isNaN(Number(event.event_time)) ? Math.floor(Number(event.event_time)) : Math.floor(Date.now() / 1000);
+
+      // ✅ VALIDAÇÃO event_time: Meta rejeita eventos > 7 dias ou no futuro
+      const now = Math.floor(Date.now() / 1000);
+      const sevenDaysAgo = now - (7 * 24 * 60 * 60);
+      const fiveMinutesFuture = now + (5 * 60); // tolerância de 5min para clock skew
+      if (eventTime < sevenDaysAgo) {
+        console.warn(`⚠️ event_time muito antigo (${Math.floor((now - eventTime) / 86400)}d atrás). Corrigindo para agora.`);
+        eventTime = now;
+      } else if (eventTime > fiveMinutesFuture) {
+        console.warn(`⚠️ event_time no futuro (${eventTime - now}s à frente). Corrigindo para agora.`);
+        eventTime = now;
+      }
+
       // ✅ Event_id já foi definido na etapa de deduplicação
       const eventId = event.event_id;
       console.log("✅ Event_id processado:", eventId);
@@ -495,9 +488,18 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
         customData.currency = customData.currency || "BRL";
       }
 
+      // ✅ IPv6 FIX: Preferir IP do frontend (IPv6 via api64.ipify.org) sobre header IP (IPv4 do CDN)
+      const frontendIP = event.user_data?.client_ip_address;
+      let finalIP = formattedIP;
+      if (typeof frontendIP === "string" && frontendIP.includes(":") && frontendIP.length > 5) {
+        // Frontend enviou IPv6 - usar esse em vez do header (que é IPv4 do Vercel CDN)
+        finalIP = formatIPForMeta(frontendIP);
+        console.log("🌐 Usando IPv6 do frontend:", finalIP, "(header era:", formattedIP, ")");
+      }
+
       const userData: Record<string, unknown> = {
         ...(externalId && { external_id: externalId }),
-        client_ip_address: formattedIP,
+        client_ip_address: finalIP,
         client_user_agent: userAgent,
       };
 
@@ -520,9 +522,8 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
           userData.fbc = processedFbc;
           console.log("✅ FBC processado e preservado:", processedFbc);
         } else {
-          // ✅ CORREÇÃO: Preservar valor original mesmo quando processamento falha
-          userData.fbc = event.user_data.fbc;
-          console.warn("⚠️ FBC não processado, mas preservando valor original:", event.user_data.fbc);
+          // ✅ V9.4 FIX: NÃO preservar fbc inválido - melhor omitir do que enviar fabricado/modificado
+          console.warn("⚠️ FBC inválido DESCARTADO (evita erro 'fbclid modificado'):", event.user_data.fbc.substring(0, 30) + '...');
         }
       }
 
@@ -565,7 +566,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
           userData.zp = postalValue;
           console.log("🌍 Postal Code já hasheado (frontend):", postalValue.substring(0, 16) + '...');
         } else {
-          userData.zp = hashSHA256(postalValue);
+          userData.zp = hashSHA256(postalValue.toLowerCase());
           console.log("🌍 Postal Code hasheado (fallback API):", (userData.zp as string).substring(0, 16) + '...');
         }
       }
@@ -595,7 +596,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
         }
       }
 
-      // Nome - normaliza para lowercase antes de hashear
+      // Nome (first name) - normaliza para lowercase antes de hashear
       if (typeof event.user_data?.fn === "string" && event.user_data.fn.trim()) {
         const nameValue = event.user_data.fn.trim().toLowerCase();
         if (nameValue.length === 64 && /^[a-f0-9]{64}$/i.test(nameValue)) {
@@ -604,6 +605,18 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
         } else {
           userData.fn = hashSHA256(nameValue);
           console.log("👤 Nome hasheado (API):", (userData.fn as string).substring(0, 16) + '...');
+        }
+      }
+
+      // Sobrenome (last name) - normaliza para lowercase antes de hashear
+      if (typeof event.user_data?.ln === "string" && event.user_data.ln.trim()) {
+        const lnValue = event.user_data.ln.trim().toLowerCase();
+        if (lnValue.length === 64 && /^[a-f0-9]{64}$/i.test(lnValue)) {
+          userData.ln = lnValue;
+          console.log("👤 Sobrenome já hasheado:", lnValue.substring(0, 16) + '...');
+        } else {
+          userData.ln = hashSHA256(lnValue);
+          console.log("👤 Sobrenome hasheado (API):", (userData.ln as string).substring(0, 16) + '...');
         }
       }
 
