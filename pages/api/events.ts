@@ -149,6 +149,11 @@ function hashSHA256(input: string): string {
   return crypto.createHash("sha256").update(input).digest("hex");
 }
 
+// ✅ Normalizar PII para Meta CAPI: lowercase + trim + remover acentos (NFD)
+function normalizePII(value: string): string {
+  return value.trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
 // ✅ IPv6 INTELIGENTE: Detecção e validação de IP com prioridade IPv6
 function getClientIP(
   req: ApiRequest
@@ -536,7 +541,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
           userData.country = countryValue;
           console.log("🌍 Country já hasheado (frontend):", countryValue.substring(0, 16) + '...');
         } else {
-          userData.country = hashSHA256(countryValue.toLowerCase());
+          userData.country = hashSHA256(normalizePII(countryValue));
           console.log("🌍 Country hasheado (fallback API):", (userData.country as string).substring(0, 16) + '...');
         }
       }
@@ -546,7 +551,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
           userData.st = stateValue;
           console.log("🌍 State já hasheado (frontend):", stateValue.substring(0, 16) + '...');
         } else {
-          userData.st = hashSHA256(stateValue.toLowerCase());
+          userData.st = hashSHA256(normalizePII(stateValue));
           console.log("🌍 State hasheado (fallback API):", (userData.st as string).substring(0, 16) + '...');
         }
       }
@@ -556,7 +561,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
           userData.ct = cityValue;
           console.log("🌍 City já hasheado (frontend):", cityValue.substring(0, 16) + '...');
         } else {
-          userData.ct = hashSHA256(cityValue.toLowerCase());
+          userData.ct = hashSHA256(normalizePII(cityValue));
           console.log("🌍 City hasheado (fallback API):", (userData.ct as string).substring(0, 16) + '...');
         }
       }
@@ -566,7 +571,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
           userData.zp = postalValue;
           console.log("🌍 Postal Code já hasheado (frontend):", postalValue.substring(0, 16) + '...');
         } else {
-          userData.zp = hashSHA256(postalValue.toLowerCase());
+          userData.zp = hashSHA256(normalizePII(postalValue));
           console.log("🌍 Postal Code hasheado (fallback API):", (userData.zp as string).substring(0, 16) + '...');
         }
       }
@@ -579,43 +584,45 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
           userData.em = emailValue;
           console.log("📧 Email já hasheado (n8n):", emailValue.substring(0, 16) + '...');
         } else {
-          userData.em = hashSHA256(emailValue);
+          userData.em = hashSHA256(normalizePII(emailValue));
           console.log("📧 Email hasheado (API):", (userData.em as string).substring(0, 16) + '...');
         }
       }
 
-      // Telefone - remove caracteres não numéricos antes de hashear
+      // Telefone - remove caracteres não numéricos e adiciona country code 55
       if (typeof event.user_data?.ph === "string" && event.user_data.ph.trim()) {
-        const phoneValue = event.user_data.ph.trim().replace(/\D/g, '');
+        let phoneValue = event.user_data.ph.trim().replace(/\D/g, '');
         if (phoneValue.length === 64 && /^[a-f0-9]{64}$/i.test(phoneValue)) {
           userData.ph = phoneValue;
           console.log("📱 Telefone já hasheado (n8n):", phoneValue.substring(0, 16) + '...');
         } else if (phoneValue.length > 0) {
+          // Adicionar country code 55 se necessário
+          if (phoneValue.length === 10 || phoneValue.length === 11) phoneValue = '55' + phoneValue;
           userData.ph = hashSHA256(phoneValue);
           console.log("📱 Telefone hasheado (API):", (userData.ph as string).substring(0, 16) + '...');
         }
       }
 
-      // Nome (first name) - normaliza para lowercase antes de hashear
+      // Nome (first name) - normaliza + remove acentos antes de hashear
       if (typeof event.user_data?.fn === "string" && event.user_data.fn.trim()) {
         const nameValue = event.user_data.fn.trim().toLowerCase();
         if (nameValue.length === 64 && /^[a-f0-9]{64}$/i.test(nameValue)) {
           userData.fn = nameValue;
           console.log("👤 Nome já hasheado (n8n):", nameValue.substring(0, 16) + '...');
         } else {
-          userData.fn = hashSHA256(nameValue);
+          userData.fn = hashSHA256(normalizePII(nameValue));
           console.log("👤 Nome hasheado (API):", (userData.fn as string).substring(0, 16) + '...');
         }
       }
 
-      // Sobrenome (last name) - normaliza para lowercase antes de hashear
+      // Sobrenome (last name) - normaliza + remove acentos antes de hashear
       if (typeof event.user_data?.ln === "string" && event.user_data.ln.trim()) {
         const lnValue = event.user_data.ln.trim().toLowerCase();
         if (lnValue.length === 64 && /^[a-f0-9]{64}$/i.test(lnValue)) {
           userData.ln = lnValue;
           console.log("👤 Sobrenome já hasheado:", lnValue.substring(0, 16) + '...');
         } else {
-          userData.ln = hashSHA256(lnValue);
+          userData.ln = hashSHA256(normalizePII(lnValue));
           console.log("👤 Sobrenome hasheado (API):", (userData.ln as string).substring(0, 16) + '...');
         }
       }
